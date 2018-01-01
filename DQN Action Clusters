@@ -1,0 +1,681 @@
+import tensorflow as tf
+import numpy as np
+import time as tic
+import xlrd as xl
+import xlwt as xlw
+import math
+
+# Using Recursive Action Search to Optimize Pricing Algorithm
+# Code needs cleaning ---- warning --------
+
+f = open('DQN_3LayerTraining_V10_result.txt', 'r+')
+
+workbook = xl.open_workbook('Quality factors for proto actions.xlsx')
+worksheet = workbook.sheet_by_index(0)
+
+group_quality = []
+
+for i in range(1,11):
+    group_quality.append(worksheet.cell(i, 0).value)
+    
+legit_quality = np.copy(group_quality)
+max_quality = np.amax(group_quality)
+for i in range(10):
+    group_quality[i] = group_quality[i]/max_quality
+    
+max_revenue = 100000
+
+t = tic.time()
+
+# Macros
+
+prob_lambda = 0.9
+number_periods = 90
+init_state = [28,28,28,27,27,27,27,27,27,27]
+types = len(init_state)
+end_state = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# Setting Constraints: first parameter is time, second sales, third revenue, fourth penalty
+
+con = [[1,1,0,25],[6,3,0,25]]
+
+# R function, computes revenue naively as the product of price and sales
+
+def R(state, price, new_state):
+    R = 0
+    for i in range(len(state)):
+        R += price[i] * (state[i] - new_state[i])
+    return R
+
+# Parameters (exploration rate) 
+epsilon = [0.5, 0.9991, 0]
+
+# Generates the first layer of proto actions
+def get_proto_actions(num_actions,num_types,num_layers):
+    width = num_actions/2
+    current_action = []
+    for i in range(num_types):
+        current_action.append(width/2)
+    
+    set_actions = []
+    
+    count = 0
+    while current_action[0] < num_actions:
+        set_actions.append(current_action[:])
+        count += 1
+        current_action[-1] += width
+        for j in range(num_types-1,0,-1):
+            if current_action[j] > num_actions:
+                current_action[j] = width/2
+                current_action[j-1] += width
+    
+    set_actions_discrete = []
+    for action in set_actions:
+        action_discrete = []
+        for price in action:
+            action_discrete.append(round(price))
+        set_actions_discrete.append(action_discrete)
+        
+    return set_actions, set_actions_discrete
+
+# Get more actions based on proto action selected
+def get_more_actions(num_actions,num_types,num_layers,layer,action):
+    width_old = num_actions/(2**(layer-1))
+    width_new = num_actions/(2**(layer))
+    
+    if layer == 3:
+        width_old = 3
+        width_new = 2
+    
+    current_action = []
+    for i in range(len(action)):
+        current_action.append(action[i]-width_old/2+width_new/2)
+    
+    set_actions = []
+    
+    count = 0
+    while (current_action[0] <= action[0]+width_old/2):
+        set_actions.append(current_action[:])
+        count += 1
+        current_action[-1] += width_new
+        for j in range(num_types-1,0,-1):
+            if current_action[j] > action[j]+width_old/2:
+                current_action[j] = action[j]-width_old/2+width_new/2
+                current_action[j-1] += width_new
+    
+    set_actions_discrete = []
+    for action in set_actions:
+        action_discrete = []
+        for price in action:
+            action_discrete.append(round(price))
+        set_actions_discrete.append(action_discrete)
+        
+    return set_actions, set_actions_discrete
+    
+# Get reference actions for stability purpose
+def get_reference_actions(action,distance):
+    result = []
+    for i in range(10):
+        action_ref = []
+        for price in action:
+            price_new = np.random.randint(0,distance+1)
+            action_ref.append(price_new)
+        result.append(action_ref)
+    return(result)
+    
+# Checks for constraints    
+def constraints(state, revenue):
+    return 0
+    
+# Normalize input for neural nets
+def input_normalized(input):
+    result = []
+    for i in range(len(input)):
+        if i<3:
+            result.append(input[i]/28)
+        if (i>=3) and (i<10):
+            result.append(input[i]/27)
+        if i == 10:
+            result.append(input[i]/30)
+        if i>10:
+            result.append(input[i]/12)
+    result.append(1.0)
+    return result
+                
+# Single Timestep for Customer Arrival/Purchase
+mean = 270
+std_dev = mean/10
+
+def transition(state, price):
+    count = 0
+    global group_quality,max_quality,f
+    prob_arrive = (np.random.normal(mean/(time+1),std_dev/(time+1)))
+    if prob_arrive <= 0:
+        prob_arrive = 0
+
+    prob_arrive = round(prob_arrive)
+    
+    f.write('customer arrived: ' + str(prob_arrive)+' ')
+
+    theta_list = []
+    all_ratio = []
+    
+    for j in range(types):
+        all_ratio.append(price[j]/legit_quality[j])
+
+    for i in range(prob_arrive):
+        prob_purchase = []
+        theta = np.random.lognormal(-0.75,0.5,1)[0]
+        for j in range(types):
+            if state[j] != 0:
+                prob_purchase.append(theta * group_quality[j]*max_quality - price[j])
+
+            else:
+                prob_purchase.append(-10000)
+
+        theta_list.append(theta)
+
+        prob_purchase.append(0)
+
+        counter = prob_purchase.count(max(prob_purchase))
+
+        if counter > 1:
+            best_purchase_mult = []
+            for i in range(type + 1):
+                if prob_purchase[i] == max(prob_purchase):
+                    best_purchase_mult.append(i)
+            best_purchase = np.random.choice(best_purchase_mult,1)
+
+        elif counter == 1:
+            best_purchase = prob_purchase.index(max(prob_purchase))
+
+        if best_purchase == types:
+            continue
+
+        else:
+            count += 1
+            state[best_purchase] += -1
+            
+    f.write(str(count)+' customers bought a unit ')
+    #print(theta_list, '\n', '\n', '\n', all_ratio)
+
+# One timestep for deep Q-learning
+def single_time_step():
+    
+    global time, state, revenue, convergence_immediate, proto_actions, group_quality, qNeuralNetworkLearningRate1, qNeuralNetworkLearningRate2, qNeuralNetworkLearningRate3, current_experience, memory_size, num_actionlayers, f, discountFactor, inverse_discountFactor
+    
+    f.write('time: '+str(time+1)+' ')
+    
+    #Getting action based on epsilon-exploration coefficient
+    random = np.random.uniform(0,1)
+    
+    set_actions = []
+    set_actions_discrete = []
+    
+    central_action = [6 for i in range(10)]
+    central_actions = [central_action]
+    
+    replay_random = np.random.uniform(0,1)    
+    if replay_random < replay_rate:       
+        f.write('experience was replayed ')
+    
+    if random < epsilon[0]:
+        f.write('random action was chosen ')
+        
+    max_Q_index = []   
+    Q_estimates = []
+    for l in range(num_actionlayers):
+        t = tic.time()
+        
+        if set_actions == []:
+            set_actions,set_actions_discrete = get_proto_actions(12,10,num_actionlayers)
+        else:
+            set_actions,set_actions_discrete = get_more_actions(12,10,num_actionlayers,l+1,central_action)
+        
+        #print('time for generating action layer: '+ str(tic.time()-t)+' ')
+        
+        t = tic.time()
+        
+        input_vector = state + [time] + central_action
+        input_vector = input_normalized(input_vector)
+        if l == 0:
+            Q_estimate = sess.run(qOut1,feed_dict={inputs1: np.array(input_vector).reshape(1,22)})
+        elif l == 1:
+            Q_estimate = sess.run(qOut2,feed_dict={inputs2: np.array(input_vector).reshape(1,22)})
+        elif l == 2:
+            Q_estimate = sess.run(qOut3,feed_dict={inputs3: np.array(input_vector).reshape(1,22)})
+        
+        Q_estimates.append(Q_estimate)
+        
+        if random >= epsilon[0]:
+            max_Q_index.append(np.argmax(Q_estimate))
+        else:
+            max_Q_index.append(np.random.randint(0,1024))
+        
+        f.write('layer: '+str(l+1)+' ')
+        f.write('maxQ index: '+str(max_Q_index[l])+' ')
+        f.write('maxQ: '+str(Q_estimate[0][max_Q_index[l]])+' ')
+        
+        central_action = set_actions[max_Q_index[l]]
+        central_action_discrete = set_actions_discrete[max_Q_index[l]]
+        
+        if l<2:
+            central_actions.append(central_action)
+        
+        #print('time for finding max in action layer: '+str(tic.time()-t)+' ')
+    
+    current_action = central_action
+    current_action_discrete = central_action_discrete
+    
+    # Convert action to price
+    current_prices = []
+    for i in range(10):
+        current_prices.append(group_quality[i]*max_quality*(1-0.40*current_action_discrete[i]/12))
+        
+    f.write('current state: ')
+    f.write(str(state)+' ')
+    f.write('current action: ')
+    f.write(str(current_action_discrete)+' ')
+        
+    old_Q = Q_estimates
+    old_max_Q_index = max_Q_index
+    old_central_actions = central_actions
+    
+    old_state = []
+    for i in range(len(state)):
+        old_state.append(state[i])
+        
+    transition(state, current_prices)   # state transition
+    
+    revenue += R(old_state, current_prices, state)
+    
+    f.write('current revenue: '+'{:0.2f} '.format(revenue))
+    
+    reward = R(old_state, current_action_discrete, state)
+    
+    experience = []
+    experience.append(old_state)
+    experience.append(time)
+    experience.append(old_central_actions)
+    experience.append(old_max_Q_index)
+    experience.append(reward)
+    experience.append(state)
+    experience.append(old_Q)
+
+    experience_index = current_experience % memory_size
+    experience_bank[experience_index] = experience
+    
+    revenue += reward
+    current_experience += 1
+    
+    '''for i in range(20):
+        print('\n')'''
+    
+    if replay_random < replay_rate: # Do experience replay
+        exp = np.random.randint(min(current_experience, memory_size))
+        
+        update_old_state = experience_bank[exp][0]
+        update_time = experience_bank[exp][1]
+        update_action = experience_bank[exp][2]
+        update_index = experience_bank[exp][3]
+        update_reward = experience_bank[exp][4]
+        update_state = experience_bank[exp][5]
+        update_old_Q = experience_bank[exp][6]
+        
+        # Find max Q for new state
+        
+        set_actions = []
+        set_actions_discrete = []
+        max_Q_index = [] 
+        Q_estimates = []
+        
+        central_action = [6 for i in range(10)]
+        central_actions = [central_action]
+            
+        for l in range(num_actionlayers):
+            t = tic.time()
+            
+            if set_actions == []:
+                set_actions,set_actions_discrete = get_proto_actions(12,10,num_actionlayers)
+            else:
+                set_actions,set_actions_discrete = get_more_actions(12,10,num_actionlayers,l+1,central_action)
+            
+            #print('time for generating action layer: '+ str(tic.time()-t)+' ')
+            
+            t = tic.time()
+            
+            input_vector = update_state + [update_time + 1] + central_action
+            input_vector = input_normalized(input_vector)
+            if l == 0:
+                Q_estimate = sess.run(qOut1_copy,feed_dict={inputs1_copy: np.array(input_vector).reshape(1,22)})
+            elif l == 1:
+                Q_estimate = sess.run(qOut2_copy,feed_dict={inputs2_copy: np.array(input_vector).reshape(1,22)})
+            elif l == 2:
+                Q_estimate = sess.run(qOut3_copy,feed_dict={inputs3_copy: np.array(input_vector).reshape(1,22)})
+            
+            Q_estimates.append(Q_estimate)
+            
+            max_Q_index.append(np.argmax(Q_estimate))
+            
+            f.write('layer: '+str(l+1)+' ')
+            f.write('maxQ index: '+str(max_Q_index[l])+' ')
+            f.write('maxQ: '+str(Q_estimate[0][max_Q_index[l]])+' ')
+        
+            central_action = set_actions[max_Q_index[l]]
+            central_action_discrete = set_actions_discrete[max_Q_index[l]]
+            
+            if l<2:
+                central_actions.append(central_action)
+            
+            #print('time for finding max in action layer: '+str(tic.time()-t)+' ')
+        
+        # Train neural networks
+        
+        t = tic.time()
+        
+        target_Q = np.copy(update_old_Q)
+        for i in range(len(target_Q)):
+            if (update_state == end_state):
+                target_Q[i][0][update_index[i]] = update_reward/max_revenue
+            elif (update_time >= 90):
+                target_Q[i][0][update_index[i]] = 0
+            else:
+                target_Q[i][0][update_index[i]] = update_reward/max_revenue + discountFactor*Q_estimates[i][0][max_Q_index[i]]
+        
+        update_vectors = []
+        for i in range(3):
+            update_vector = update_old_state + [update_time] + update_action[i]
+            update_vector = input_normalized(update_vector)
+            update_vectors.append(update_vector)
+        
+        minimizer1 = sess.run([updateModel1],feed_dict={inputs1:np.array(update_vectors[0]).reshape(1,22), nextQ:target_Q[0]})
+        minimizer2 = sess.run([updateModel2],feed_dict={inputs2:np.array(update_vectors[1]).reshape(1,22), nextQ:target_Q[1]})
+        minimizer3 = sess.run([updateModel3],feed_dict={inputs3:np.array(update_vectors[2]).reshape(1,22), nextQ:target_Q[2]})
+        
+    # Do normal training after potential experience replay
+    
+    update_old_state = old_state
+    update_time = time
+    update_action = old_central_actions
+    update_index = old_max_Q_index
+    update_reward = reward
+    update_state = state
+    update_old_Q = old_Q
+        
+    # Find max Q for new state
+    
+    set_actions = []
+    set_actions_discrete = []
+    max_Q_index = [] 
+    Q_estimates = []
+    
+    central_action = [6 for i in range(10)]
+    central_actions = [central_action]
+        
+    for l in range(num_actionlayers):
+        t = tic.time()
+        
+        if set_actions == []:
+            set_actions,set_actions_discrete = get_proto_actions(12,10,num_actionlayers)
+        else:
+            set_actions,set_actions_discrete = get_more_actions(12,10,num_actionlayers,l+1,central_action)
+        
+        #print('time for generating action layer: '+ str(tic.time()-t)+' ')
+        
+        t = tic.time()
+        
+        input_vector = update_state + [update_time + 1] + central_action
+        input_vector = input_normalized(input_vector)
+        if l == 0:
+            Q_estimate = sess.run(qOut1_copy,feed_dict={inputs1_copy: np.array(input_vector).reshape(1,22)})
+        elif l == 1:
+            Q_estimate = sess.run(qOut2_copy,feed_dict={inputs2_copy: np.array(input_vector).reshape(1,22)})
+        elif l == 2:
+            Q_estimate = sess.run(qOut3_copy,feed_dict={inputs3_copy: np.array(input_vector).reshape(1,22)})
+        
+        Q_estimates.append(Q_estimate)
+        
+        max_Q_index.append(np.argmax(Q_estimate))
+        
+        f.write('layer: '+str(l+1)+' ')
+        f.write('maxQ index: '+str(max_Q_index[l])+' ')
+        f.write('maxQ: '+str(Q_estimate[0][max_Q_index[l]])+' ')
+
+        central_action = set_actions[max_Q_index[l]]
+        central_action_discrete = set_actions_discrete[max_Q_index[l]]
+        
+        if l<2:
+            central_actions.append(central_action)
+        
+        #print('time for finding max in action layer: '+str(tic.time()-t)+' ')
+    
+    # Train neural networks
+    
+    t = tic.time()
+    
+    target_Q = np.copy(update_old_Q)
+    for i in range(len(target_Q)):
+        if (update_state == end_state):
+            target_Q[i][0][update_index[i]] = update_reward/max_revenue
+        else:
+            target_Q[i][0][update_index[i]] = update_reward/max_revenue + discountFactor*Q_estimates[i][0][max_Q_index[i]]
+    
+    update_vectors = []
+    for i in range(3):
+        update_vector = update_old_state + [update_time] + update_action[i]
+        update_vector = input_normalized(update_vector)
+        update_vectors.append(update_vector)
+    
+    minimizer1 = sess.run([updateModel1],feed_dict={inputs1:np.array(update_vectors[0]).reshape(1,22), nextQ:target_Q[0]})
+    minimizer2 = sess.run([updateModel2],feed_dict={inputs2:np.array(update_vectors[1]).reshape(1,22), nextQ:target_Q[1]})
+    minimizer3 = sess.run([updateModel3],feed_dict={inputs3:np.array(update_vectors[2]).reshape(1,22), nextQ:target_Q[2]})
+    
+    qNeuralNetworkLearningRate1 = qNeuralNetworkLearningRate1*0.9991
+    qNeuralNetworkLearningRate2 = qNeuralNetworkLearningRate2*0.9991
+    qNeuralNetworkLearningRate3 = qNeuralNetworkLearningRate3*0.9991
+    
+    discountFactor = 1 - inverse_discountFactor
+    inverse_discountFactor *= 0.9991
+        
+    for i in range(len(convergence_immediate)):  
+        if update_state == end_state:
+            convergence_immediate[i] += abs(update_old_Q[i][0][update_index[i]] - update_reward/max_revenue)
+        elif (update_time >= 90):
+            convergence_immediate[i] += abs(update_old_Q[i][0][update_index[i]])
+        else:
+            convergence_immediate[i] += abs(update_old_Q[i][0][update_index[i]] - update_reward/max_revenue - discountFactor*Q_estimates[i][0][max_Q_index[i]])
+            
+        f.write('\n'+'convergence_immediate for layer '+str(i)+' : '+ str(convergence_immediate[i])+' ')
+
+    f.write('\n')
+    
+    time += 1
+    
+    #print('time for training neural networks: '+str(tic.time()-t)+' ')
+    
+    return
+
+t1 = tic.time()
+
+# action layer parameters
+num_actionlayers = 3
+
+# Q-learning and Output 
+time_list = []
+convergence_lists = []
+revenue_list = []
+increment = 1
+repetitions = 150
+convergence_immediate = [0,0,0]
+replay_rate = 0.1
+
+discountFactor = 0.90
+inverse_discountFactor = 0.01
+
+#set learning parameter
+iteration = 10000
+startingTimeZoneId = 0
+startingQNeuralNetworkLearningRate1 = 0.0001
+startingQNeuralNetworkLearningRate2 = 0.001
+startingQNeuralNetworkLearningRate3 = 0.01
+qNeuralNetworkLearningRate1 = startingQNeuralNetworkLearningRate1
+qNeuralNetworkLearningRate2 = startingQNeuralNetworkLearningRate2
+qNeuralNetworkLearningRate3 = startingQNeuralNetworkLearningRate3
+
+#These lines establish the feed-forward part of the network used to choose actions
+inputs1 = tf.placeholder(shape=[1,22],dtype=tf.float32)
+w11 = tf.Variable(tf.random_uniform([22,1200],0.0,0.01))
+b1 = 1.0
+layerOne = tf.concat([tf.matmul(inputs1,w11),[[b1]]],1)
+w12 = tf.Variable(tf.random_uniform([1201,1024],0.0,0.01))
+qOut1 = tf.matmul(layerOne,w12)
+
+inputs2 = tf.placeholder(shape=[1,22],dtype=tf.float32)
+w21 = tf.Variable(tf.random_uniform([22,1200],0.0,0.01))
+layerTwo = tf.concat([tf.matmul(inputs2,w21),[[b1]]],1)
+w22 = tf.Variable(tf.random_uniform([1201,1024],0.0,0.01))
+qOut2 = tf.matmul(layerTwo,w22)
+
+inputs3 = tf.placeholder(shape=[1,22],dtype=tf.float32)
+w31 = tf.Variable(tf.random_uniform([22,1200],0.0,0.01))
+layerThree = tf.concat([tf.matmul(inputs3,w31),[[b1]]],1)
+w32 = tf.Variable(tf.random_uniform([1201,1024],0.0,0.01))
+qOut3 = tf.matmul(layerThree,w32)
+
+inputs1_copy = tf.placeholder(shape=[1,22],dtype=tf.float32)
+w11_copy = tf.Variable(tf.random_uniform([22,1200],0.0,0.01))
+layerOne_copy = tf.concat([tf.matmul(inputs1_copy,w11_copy),[[b1]]],1)
+w12_copy = tf.Variable(tf.random_uniform([1201,1024],0.0,0.01))
+qOut1_copy = tf.matmul(layerOne_copy,w12_copy)
+
+inputs2_copy = tf.placeholder(shape=[1,22],dtype=tf.float32)
+w21_copy = tf.Variable(tf.random_uniform([22,1200],0.0,0.01))
+layerTwo_copy = tf.concat([tf.matmul(inputs2_copy,w21_copy),[[b1]]],1)
+w22_copy = tf.Variable(tf.random_uniform([1201,1024],0.0,0.01))
+qOut2_copy = tf.matmul(layerTwo_copy,w22_copy)
+
+inputs3_copy = tf.placeholder(shape=[1,22],dtype=tf.float32)
+w31_copy = tf.Variable(tf.random_uniform([22,1200],0.0,0.01))
+layerThree_copy = tf.concat([tf.matmul(inputs3_copy,w31_copy),[[b1]]],1)
+w32_copy = tf.Variable(tf.random_uniform([1201,1024],0.0,0.01))
+qOut3_copy = tf.matmul(layerThree_copy,w32_copy)
+
+w11_assign = w11_copy.assign(w11)
+w12_assign = w12_copy.assign(w12)
+w21_assign = w21_copy.assign(w21)
+w22_assign = w22_copy.assign(w22)
+w31_assign = w31_copy.assign(w31)
+w32_assign = w32_copy.assign(w32)
+
+copy_weights = [w11_assign,w12_assign,w21_assign,w22_assign,w31_assign,w32_assign]
+    
+#Below we obtain the loss by taking the sum of squares difference between the target and prediction Q values.
+nextQ = tf.placeholder(shape=[1,1024],dtype=tf.float32)
+loss1 = tf.reduce_sum(tf.square(nextQ - qOut1))
+loss2 = tf.reduce_sum(tf.square(nextQ - qOut2))
+loss3 = tf.reduce_sum(tf.square(nextQ - qOut3))
+trainer1 = tf.train.FtrlOptimizer(learning_rate=qNeuralNetworkLearningRate1)
+trainer2 = tf.train.FtrlOptimizer(learning_rate=qNeuralNetworkLearningRate2)
+trainer3 = tf.train.FtrlOptimizer(learning_rate=qNeuralNetworkLearningRate3)
+updateModel1 = trainer1.minimize(loss1)
+updateModel2 = trainer2.minimize(loss2)
+updateModel3 = trainer3.minimize(loss3)
+
+init = tf.global_variables_initializer()
+saver = tf.train.Saver()
+
+with tf.Session() as sess:
+    sess.run(init)
+    #saver.restore(sess, "/tmp/model_3LayerTraining_V10.ckpt")
+    sess.run(copy_weights)
+    
+    average_revenue = 0
+    temp_units_left = 0
+    units_left = []
+    for i in range(10000):
+        t2 = tic.time()
+        f.write('iteration: '+str(i+1)+' ')
+        f.write('\n')
+        
+        state = []
+        for j in range(types):
+            state.append(init_state[j])
+        time = 0
+        revenue = 0
+        
+        experience_bank = []
+        reward_list = []
+
+        memory_size = 100
+        current_experience = 0
+    
+        for j in range(memory_size):
+            experience_bank.append([])
+
+        while((state != end_state) and (time < 90)):
+            single_time_step()
+            if (state == end_state and time < 90) or (time == 90):
+                average_revenue += revenue
+                temp_units_left += sum(state)
+            if (state == end_state):
+                f.write('sold out at time '+str(time)+' ')
+            
+        if epsilon[0] > epsilon[2]:
+            epsilon[0] *= epsilon[1]
+        
+        if (i+1)%10 == 0:
+            sess.run(copy_weights)
+            
+        if (i+1)%increment == 0:
+            f.write(str(i)+' '+str(tic.time() - t)+' ')
+            
+            convergence_list = []
+            for i in range(len(convergence_immediate)):      
+                convergence_list.append(abs(convergence_immediate[i]/increment))
+            convergence_lists.append(convergence_list)
+            convergence_immediate = [0,0,0]
+            
+            revenue_list.append(average_revenue/increment)
+            units_left.append(temp_units_left/increment)
+            average_revenue = 0
+            temp_units_left = 0
+            
+            time_list.append(time)
+        
+        f.write('\n'+'total revenue for iteration '+str(i+1)+': '+'{:0.2f}'.format(revenue)+' ')
+        f.write('\n'+'units left for iteration '+str(i+1)+': '+'{:0.2f}'.format(sum(state))+' ')
+        f.write('\n'+'total time for iteration '+str(i+1)+': '+str(tic.time()-t2)+' ')
+        f.write('\n')
+        f.write('\n')
+        f.write('\n')
+        
+        save_path = saver.save(sess, "/tmp/model_3LayerTraining_V10.ckpt")
+    
+    total_time = tic.time() - t1
+    hours = int(total_time/3600)
+    minutes = int((total_time-hours*3600)/60)
+    seconds = int(total_time - hours*3600 - minutes*60)
+    f.write('\n'+'total time for {} iterations: {} hours {} minutes {} seconds'.format(iteration,hours,minutes,seconds))
+    
+book = xlw.Workbook(encoding="utf-8")
+sheet1 = book.add_sheet("Sheet 1")
+sheet1.write(0,0,"Iteration Number")
+sheet1.write(0,1,"Convergence 1")
+sheet1.write(0,2,"Convergence 2")
+sheet1.write(0,3,"Convergence 3")
+sheet1.write(0,4,"Revenue")
+sheet1.write(0,5,"Units Left")
+sheet1.write(0,6,"Time")
+
+for i in range(len(convergence_lists)):
+    sheet1.write(i+1, 0, i * increment)
+    sheet1.write(i+1, 1, convergence_lists[i][0])
+    sheet1.write(i+1, 2, convergence_lists[i][1])
+    sheet1.write(i+1, 3, convergence_lists[i][2])
+    sheet1.write(i+1, 4, revenue_list[i])
+    sheet1.write(i+1, 5, units_left[i])
+    sheet1.write(i+1, 6, time_list[i])
+
+book.save("DQN Action Clusters.xls")        
+
+f.close()
